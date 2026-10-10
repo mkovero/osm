@@ -180,6 +180,9 @@ void Measurement::fromJSON(QJsonObject data, const SourceList *list) noexcept
     setWindowFunctionType(data["window.type"     ].toInt(m_windowFunctionType));
     setPolarity(         data["polarity"         ].toBool(polarity()));
     selectDevice(        data["deviceName"       ].toString(deviceName()));
+    // Source::fromJSON applied "active" while the default device was still selected; when
+    // that device fails to open, the measurement came back inactive on the saved device.
+    setActive(           data["active"           ].toBool(active()));
     setInputFilter(      data["inputFilters"     ].toInt(inputFilter()));
 
     QJsonObject calibration = data["calibration"].toObject();
