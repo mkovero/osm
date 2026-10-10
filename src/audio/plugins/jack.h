@@ -20,12 +20,15 @@
 
 #include "../plugin.h"
 #include <QObject>
+#include <atomic>
 #include <functional>
 #include <jack/jack.h>
+#include <jack/ringbuffer.h>
 #include <jack/types.h>
 #include <map>
 #include <memory>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace audio {
@@ -34,7 +37,9 @@ class JackClient : public QObject
     Q_OBJECT
 
 public:
-    constexpr static std::size_t BUFFER_SIZE_MULTIPLIER{4};
+    // Seconds of audio the ring buffer between the JACK thread and the
+    // endpoint thread can hold before the JACK thread starts dropping input.
+    constexpr static unsigned int RING_SECONDS{2};
 
     JackClient(const Plugin::Direction &direction, QIODevice& endpoint);
     JackClient(JackClient&&) = default;
@@ -80,15 +85,29 @@ private:
     void processInputPorts(jack_nframes_t nframes);
     void processOutputPorts(jack_nframes_t nframes);
 
+    void startEndpointThread();
+    void stopEndpointThread();
+    void endpointThreadLoop();
+    std::size_t outputTargetBytes() const;
+    void fillOutputRing();
+
     std::unique_ptr<jack_client_t, std::function<void(jack_client_t *)>> m_client;
     std::vector<std::unique_ptr<jack_port_t, std::function<void(jack_port_t *)>>> m_ports;
     std::vector<float*> m_portBuffers;
-    jack_nframes_t m_sampleRate;
-    jack_nframes_t m_bufferSize;
+    std::atomic<jack_nframes_t> m_sampleRate;
+    std::atomic<jack_nframes_t> m_bufferSize;
     const Plugin::Direction m_direction;
     QIODevice& m_endpoint;
-    std::vector<float> m_sampleBuffer;
-    bool m_active{false};
+
+    // The JACK process thread is real-time: it only copies between the ports
+    // and this lock-free ring. m_endpointThread moves the ring's contents to
+    // or from m_endpoint, whose consumers lock mutexes and emit signals.
+    std::unique_ptr<jack_ringbuffer_t, void(*)(jack_ringbuffer_t *)> m_ring;
+    std::vector<float> m_transferBuffer;
+    std::thread m_endpointThread;
+    std::atomic<bool> m_endpointRunning{false};
+    std::atomic<unsigned int> m_dropouts{0};
+    std::atomic<bool> m_active{false};
 };
 
 class JackPlugin : public Plugin
@@ -108,6 +127,8 @@ public:
     Stream *open(const DeviceInfo::Id &id, const Direction &mode, const Format &format, QIODevice *endpoint) override;
 
 private:
+    void installTerminationHandler();
+
     DeviceInfo::List m_list{};
     DeviceInfo m_defaultDeviceInfoInput;
     DeviceInfo m_defaultDeviceInfoOutput;
